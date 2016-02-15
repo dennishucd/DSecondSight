@@ -1,6 +1,7 @@
 package cn.dennishucd.secondsight;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.List;
 
 import org.opencv.android.BaseLoaderCallback;
@@ -36,6 +37,7 @@ import android.view.SubMenu;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Toast;
+import cn.dennishucd.secondsight.ar.ImageDetectionFilter;
 import cn.dennishucd.secondsight.filters.Filter;
 import cn.dennishucd.secondsight.filters.NoneFilter;
 import cn.dennishucd.secondsight.filters.convolution.StrokeEdgesFilter;
@@ -89,14 +91,20 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 	private static final String STATE_CURVE_FILTER_INDEX = "curveFilterIndex";
 	private static final String STATE_MIXER_FILTER_INDEX = "mixerFilterIndex";
 	private static final String STATE_CONVOLUTION_FILTER_INDEX = "convolutionFilterIndex";
+
+	private static final String STATE_IMAGE_DETECTION_FILTER_INDEX = "imageDetectionFilterIndex";
+
 	// The filters.
 	private Filter[] mCurveFilters;
 	private Filter[] mMixerFilters;
 	private Filter[] mConvolutionFilters;
+	private Filter[] mImageDetectionFilters;
+
 	// The indices of the active filters.
 	private int mCurveFilterIndex;
 	private int mMixerFilterIndex;
 	private int mConvolutionFilterIndex;
+	private int mImageDetectionFilterIndex;
 
 	// The OpenCV loader callback.
 	private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
@@ -114,6 +122,27 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 				mMixerFilters = new Filter[] { new NoneFilter(), new RecolorRCFilter(),
 						new RecolorRGVFilter(), new RecolorCMVFilter() };
 				mConvolutionFilters = new Filter[] { new NoneFilter(), new StrokeEdgesFilter() };
+
+				final Filter starryNight;
+				try {
+					starryNight = new ImageDetectionFilter(CameraActivity.this,
+							R.drawable.starry_night);
+				} catch (IOException e) {
+					Log.e(TAG, "Failed to load drawable: " + "starry_night");
+					e.printStackTrace();
+					break;
+				}
+				final Filter akbarHunting;
+				try {
+					akbarHunting = new ImageDetectionFilter(CameraActivity.this,
+							R.drawable.akbar_hunting_with_cheetahs);
+				} catch (IOException e) {
+					Log.e(TAG, "Failed to load drawable: " + "akbar_hunting_with_cheetahs");
+					e.printStackTrace();
+					break;
+				}
+				mImageDetectionFilters = new Filter[] { new NoneFilter(), starryNight,
+						akbarHunting };
 
 				break;
 			default:
@@ -136,12 +165,15 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 			mCurveFilterIndex = savedInstanceState.getInt(STATE_CURVE_FILTER_INDEX, 0);
 			mMixerFilterIndex = savedInstanceState.getInt(STATE_MIXER_FILTER_INDEX, 0);
 			mConvolutionFilterIndex = savedInstanceState.getInt(STATE_CONVOLUTION_FILTER_INDEX, 0);
+			mImageDetectionFilterIndex = savedInstanceState
+					.getInt(STATE_IMAGE_DETECTION_FILTER_INDEX, 0);
 		} else {
 			mCameraIndex = 0;
 			mImageSizeIndex = 0;
 			mCurveFilterIndex = 0;
 			mMixerFilterIndex = 0;
 			mConvolutionFilterIndex = 0;
+			mImageDetectionFilterIndex = 0;
 		}
 
 		final Camera camera;
@@ -178,6 +210,7 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 		savedInstanceState.putInt(STATE_CURVE_FILTER_INDEX, mCurveFilterIndex);
 		savedInstanceState.putInt(STATE_MIXER_FILTER_INDEX, mMixerFilterIndex);
 		savedInstanceState.putInt(STATE_CONVOLUTION_FILTER_INDEX, mConvolutionFilterIndex);
+		savedInstanceState.putInt(STATE_IMAGE_DETECTION_FILTER_INDEX, mImageDetectionFilterIndex);
 
 		super.onSaveInstanceState(savedInstanceState);
 	}
@@ -285,6 +318,13 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 				mConvolutionFilterIndex = 0;
 			}
 			return true;
+		case R.id.menu_next_image_detection_filter:
+			mImageDetectionFilterIndex++;
+			if (mImageDetectionFilterIndex == mImageDetectionFilters.length) {
+				mImageDetectionFilterIndex = 0;
+			}
+			//Toast.makeText(this, "image detection", Toast.LENGTH_SHORT).show();
+			return true;
 		default:
 			return super.onOptionsItemSelected(item);
 		}
@@ -307,9 +347,20 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 		final Mat rgba = inputFrame.rgba();
 
 		// Apply the active filters.
-		mCurveFilters[mCurveFilterIndex].apply(rgba, rgba);
-		mMixerFilters[mMixerFilterIndex].apply(rgba, rgba);
-		mConvolutionFilters[mConvolutionFilterIndex].apply(rgba, rgba);
+		if (mCurveFilters != null) {
+			mCurveFilters[mCurveFilterIndex].apply(rgba, rgba);
+		}
+		if (mMixerFilters != null) {
+			mMixerFilters[mMixerFilterIndex].apply(rgba, rgba);
+		}
+		if (mConvolutionFilters != null) {
+			mConvolutionFilters[mConvolutionFilterIndex].apply(rgba, rgba);
+		}
+		if (mImageDetectionFilters != null) {
+			mImageDetectionFilters[mImageDetectionFilterIndex].apply(rgba, rgba);
+			
+			//Log.i("onCameraFrame", "mMixerFilterIndex "+mImageDetectionFilterIndex);
+		}
 
 		if (mIsPhotoPending) {
 			mIsPhotoPending = false;
