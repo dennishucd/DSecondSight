@@ -36,6 +36,16 @@ import android.view.SubMenu;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Toast;
+import cn.dennishucd.secondsight.filters.Filter;
+import cn.dennishucd.secondsight.filters.NoneFilter;
+import cn.dennishucd.secondsight.filters.convolution.StrokeEdgesFilter;
+import cn.dennishucd.secondsight.filters.curve.CrossProcessCurveFilter;
+import cn.dennishucd.secondsight.filters.curve.PortraCurveFilter;
+import cn.dennishucd.secondsight.filters.curve.ProviaCurveFilter;
+import cn.dennishucd.secondsight.filters.curve.VelviaCurveFilter;
+import cn.dennishucd.secondsight.filters.mixer.RecolorCMVFilter;
+import cn.dennishucd.secondsight.filters.mixer.RecolorRCFilter;
+import cn.dennishucd.secondsight.filters.mixer.RecolorRGVFilter;
 
 @SuppressLint("NewApi")
 @SuppressWarnings("deprecation")
@@ -74,6 +84,20 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 	// If so, menu interaction should be disabled.
 	private boolean mIsMenuLocked;
 
+	// add for chapter 3: applying imge effects
+	// Keys for storing the indices of the active filters.
+	private static final String STATE_CURVE_FILTER_INDEX = "curveFilterIndex";
+	private static final String STATE_MIXER_FILTER_INDEX = "mixerFilterIndex";
+	private static final String STATE_CONVOLUTION_FILTER_INDEX = "convolutionFilterIndex";
+	// The filters.
+	private Filter[] mCurveFilters;
+	private Filter[] mMixerFilters;
+	private Filter[] mConvolutionFilters;
+	// The indices of the active filters.
+	private int mCurveFilterIndex;
+	private int mMixerFilterIndex;
+	private int mConvolutionFilterIndex;
+
 	// The OpenCV loader callback.
 	private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
 		@Override
@@ -83,6 +107,14 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 				Log.d(TAG, "OpenCV loaded successfully");
 				mCameraView.enableView();
 				mBgr = new Mat();
+
+				mCurveFilters = new Filter[] { new NoneFilter(), new PortraCurveFilter(),
+						new ProviaCurveFilter(), new VelviaCurveFilter(),
+						new CrossProcessCurveFilter() };
+				mMixerFilters = new Filter[] { new NoneFilter(), new RecolorRCFilter(),
+						new RecolorRGVFilter(), new RecolorCMVFilter() };
+				mConvolutionFilters = new Filter[] { new NoneFilter(), new StrokeEdgesFilter() };
+
 				break;
 			default:
 				super.onManagerConnected(status);
@@ -101,9 +133,15 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 		if (savedInstanceState != null) {
 			mCameraIndex = savedInstanceState.getInt(STATE_CAMERA_INDEX, 0);
 			mImageSizeIndex = savedInstanceState.getInt(STATE_IMAGE_SIZE_INDEX, 0);
+			mCurveFilterIndex = savedInstanceState.getInt(STATE_CURVE_FILTER_INDEX, 0);
+			mMixerFilterIndex = savedInstanceState.getInt(STATE_MIXER_FILTER_INDEX, 0);
+			mConvolutionFilterIndex = savedInstanceState.getInt(STATE_CONVOLUTION_FILTER_INDEX, 0);
 		} else {
 			mCameraIndex = 0;
 			mImageSizeIndex = 0;
+			mCurveFilterIndex = 0;
+			mMixerFilterIndex = 0;
+			mConvolutionFilterIndex = 0;
 		}
 
 		final Camera camera;
@@ -135,6 +173,12 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 		savedInstanceState.putInt(STATE_CAMERA_INDEX, mCameraIndex);
 		// Save the current image size index.
 		savedInstanceState.putInt(STATE_IMAGE_SIZE_INDEX, mImageSizeIndex);
+
+		// Save the current filter indices.
+		savedInstanceState.putInt(STATE_CURVE_FILTER_INDEX, mCurveFilterIndex);
+		savedInstanceState.putInt(STATE_MIXER_FILTER_INDEX, mMixerFilterIndex);
+		savedInstanceState.putInt(STATE_CONVOLUTION_FILTER_INDEX, mConvolutionFilterIndex);
+
 		super.onSaveInstanceState(savedInstanceState);
 	}
 
@@ -223,6 +267,24 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 			// Next frame, take the photo.
 			mIsPhotoPending = true;
 			return true;
+		case R.id.menu_next_curve_filter:
+			mCurveFilterIndex++;
+			if (mCurveFilterIndex == mCurveFilters.length) {
+				mCurveFilterIndex = 0;
+			}
+			return true;
+		case R.id.menu_next_mixer_filter:
+			mMixerFilterIndex++;
+			if (mMixerFilterIndex == mMixerFilters.length) {
+				mMixerFilterIndex = 0;
+			}
+			return true;
+		case R.id.menu_next_convolution_filter:
+			mConvolutionFilterIndex++;
+			if (mConvolutionFilterIndex == mConvolutionFilters.length) {
+				mConvolutionFilterIndex = 0;
+			}
+			return true;
 		default:
 			return super.onOptionsItemSelected(item);
 		}
@@ -243,6 +305,12 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 	@Override
 	public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
 		final Mat rgba = inputFrame.rgba();
+
+		// Apply the active filters.
+		mCurveFilters[mCurveFilterIndex].apply(rgba, rgba);
+		mMixerFilters[mMixerFilterIndex].apply(rgba, rgba);
+		mConvolutionFilters[mConvolutionFilterIndex].apply(rgba, rgba);
+
 		if (mIsPhotoPending) {
 			mIsPhotoPending = false;
 			takePhoto(rgba);
