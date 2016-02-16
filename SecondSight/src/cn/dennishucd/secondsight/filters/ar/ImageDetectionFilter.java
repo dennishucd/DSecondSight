@@ -1,4 +1,4 @@
-package cn.dennishucd.secondsight.ar;
+package cn.dennishucd.secondsight.filters.ar;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -12,11 +12,13 @@ import org.opencv.core.DMatch;
 import org.opencv.core.KeyPoint;
 import org.opencv.core.Mat;
 import org.opencv.core.MatOfDMatch;
+import org.opencv.core.MatOfDouble;
 import org.opencv.core.MatOfKeyPoint;
 import org.opencv.core.MatOfPoint;
 import org.opencv.core.MatOfPoint2f;
+import org.opencv.core.MatOfPoint3f;
 import org.opencv.core.Point;
-import org.opencv.core.Scalar;
+import org.opencv.core.Point3;
 import org.opencv.features2d.DescriptorExtractor;
 import org.opencv.features2d.DescriptorMatcher;
 import org.opencv.features2d.FeatureDetector;
@@ -24,9 +26,9 @@ import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 
 import android.content.Context;
-import cn.dennishucd.secondsight.filters.Filter;
+import cn.dennishucd.secondsight.adapters.CameraProjectionAdapter;
 
-public class ImageDetectionFilter implements Filter {
+public class ImageDetectionFilter implements ARFilter {
 	// The reference image (this detector's target).
 	private final Mat mReferenceImage;
 	// Features of the reference image.
@@ -45,8 +47,6 @@ public class ImageDetectionFilter implements Filter {
 	// Tentative corner coordinates detected in the scene, in
 	// pixels.
 	private final Mat mCandidateSceneCorners = new Mat(4, 1, CvType.CV_32FC2);
-	// Good corner coordinates detected in the scene, in pixels.
-	private final Mat mSceneCorners = new Mat(4, 1, CvType.CV_32FC2);
 	// The good detected corner coordinates, in pixels, as integers.
 	private final MatOfPoint mIntSceneCorners = new MatOfPoint();
 	// A grayscale version of the scene.
@@ -63,11 +63,31 @@ public class ImageDetectionFilter implements Filter {
 	// descriptors.
 	private final DescriptorMatcher mDescriptorMatcher = DescriptorMatcher
 			.create(DescriptorMatcher.BRUTEFORCE_HAMMINGLUT);
-	// The color of the outline drawn around the detected image.
-	private final Scalar mLineColor = new Scalar(0, 255, 0);
+	// The reference image's corner coordinates, in 3D, in real units.
+	private final MatOfPoint3f mReferenceCorners3D = new MatOfPoint3f();
+	// Good corner coordinates detected in the scene, in
+	// pixels.
+	private final MatOfPoint2f mSceneCorners2D = new MatOfPoint2f();
+	// Distortion coefficients of the camera's lens.
+	// Assume no distortion.
+	private final MatOfDouble mDistCoeffs = new MatOfDouble(0.0, 0.0, 0.0, 0.0);
+	// An adaptor that provides the camera's projection matrix.
+	private final CameraProjectionAdapter mCameraProjectionAdapter;
+	// The Euler angles of the detected target.
+	private final MatOfDouble mRVec = new MatOfDouble();
+	// The XYZ coordinates of the detected target.
+	private final MatOfDouble mTVec = new MatOfDouble();
+	// The rotation matrix of the detected target.
+	private final MatOfDouble mRotation = new MatOfDouble();
 
-	public ImageDetectionFilter(final Context context, final int referenceImageResourceID)
-			throws IOException {
+	// The OpenGL pose matrix of the detected target.
+	private final float[] mGLPose = new float[16];
+	// Whether the target is currently detected.
+	private boolean mTargetFound = false;
+
+	public ImageDetectionFilter(final Context context, final int referenceImageResourceID,
+			final CameraProjectionAdapter cameraProjectionAdapter, final double realSize)
+					throws IOException {
 		// Load the reference image from the app's resources.
 		// It is loaded in BGR (blue, green, red) format.
 		mReferenceImage = Utils.loadResource(context, referenceImageResourceID,
@@ -87,6 +107,42 @@ public class ImageDetectionFilter implements Filter {
 		mFeatureDetector.detect(referenceImageGray, mReferenceKeypoints);
 		mDescriptorExtractor.compute(referenceImageGray, mReferenceKeypoints,
 				mReferenceDescriptors);
+
+		// Compute the image's width and height in real units, based
+		// on the specified real size of the image's smaller
+		// dimension.
+		final double aspectRatio = (double) referenceImageGray.cols()
+				/ (double) referenceImageGray.rows();
+		final double halfRealWidth;
+		final double halfRealHeight;
+		if (referenceImageGray.cols() > referenceImageGray.rows()) {
+			halfRealHeight = 0.5f * realSize;
+			halfRealWidth = halfRealHeight * aspectRatio;
+		} else {
+			halfRealWidth = 0.5f * realSize;
+			halfRealHeight = halfRealWidth / aspectRatio;
+		}
+		// Define the printed image so that it normally lies in the
+		// xy plane (like a painting or poster on a wall).
+		// That is, +z normally points out of the page toward the
+		// viewer.
+		mReferenceCorners3D.fromArray(new Point3(-halfRealWidth, -halfRealHeight, 0.0),
+				new Point3(halfRealWidth, -halfRealHeight, 0.0),
+				new Point3(halfRealWidth, halfRealHeight, 0.0),
+				new Point3(-halfRealWidth, halfRealHeight, 0.0));
+
+		// Detect the reference features and compute their
+		// descriptors.
+		mFeatureDetector.detect(referenceImageGray, mReferenceKeypoints);
+		mDescriptorExtractor.compute(referenceImageGray, mReferenceKeypoints,
+				mReferenceDescriptors);
+
+		mCameraProjectionAdapter = cameraProjectionAdapter;
+	}
+
+	@Override
+	public float[] getGLPose() {
+		return (mTargetFound ? mGLPose : null);
 	}
 
 	@Override
@@ -98,15 +154,17 @@ public class ImageDetectionFilter implements Filter {
 		mFeatureDetector.detect(mGraySrc, mSceneKeypoints);
 		mDescriptorExtractor.compute(mGraySrc, mSceneKeypoints, mSceneDescriptors);
 		mDescriptorMatcher.match(mSceneDescriptors, mReferenceDescriptors, mMatches);
-		// Attempt to find the target image's corners in the scene.
-		findSceneCorners();
+
+		// Attempt to find the target image's 3D pose in the scene.
+		findPose();
+
 		// If the corners have been found, draw an outline around the
 		// target image.
-		// Else, draw a thumbnail of the target image. 
+		// Else, draw a thumbnail of the target image.
 		draw(src, dst);
 	}
 
-	private void findSceneCorners() {
+	private void findPose() {
 		List<DMatch> matchesList = mMatches.toList();
 		if (matchesList.size() < 4) {
 			// There are too few matches to find the homography.
@@ -114,7 +172,7 @@ public class ImageDetectionFilter implements Filter {
 		}
 		List<KeyPoint> referenceKeypointsList = mReferenceKeypoints.toList();
 		List<KeyPoint> sceneKeypointsList = mSceneKeypoints.toList();
-		
+
 		// Calculate the max and min distances between keypoints.
 		double maxDist = 0.0;
 		double minDist = Double.MAX_VALUE;
@@ -133,8 +191,7 @@ public class ImageDetectionFilter implements Filter {
 		// for similarity between the matched descriptors.
 		if (minDist > 50.0) {
 			// The target is completely lost.
-			// Discard any previously found corners.
-			mSceneCorners.create(0, 0, mSceneCorners.type());
+			mTargetFound = false;
 			return;
 		} else if (minDist > 25.0) {
 			// The target is lost but maybe it is still close.
@@ -174,20 +231,61 @@ public class ImageDetectionFilter implements Filter {
 		// Check whether the corners form a convex polygon. If not,
 		// (that is, if the corners form a concave polygon), the
 		// detection result is invalid because no real perspective can
-		// make the corners of a rectangular image look like a concave
-		// polygon!
-		if (Imgproc.isContourConvex(mIntSceneCorners)) {
-			// The corners form a convex polygon, so record them as
-			// valid scene corners.
-			mCandidateSceneCorners.copyTo(mSceneCorners);
+		// make the corners of a rectangular image look like a concave polygon!
+		if (!Imgproc.isContourConvex(mIntSceneCorners)) {
+			return;
 		}
+		double[] sceneCorner0 = mCandidateSceneCorners.get(0, 0);
+		double[] sceneCorner1 = mCandidateSceneCorners.get(1, 0);
+		double[] sceneCorner2 = mCandidateSceneCorners.get(2, 0);
+		double[] sceneCorner3 = mCandidateSceneCorners.get(3, 0);
+		mSceneCorners2D.fromArray(new Point(sceneCorner0[0], sceneCorner0[1]),
+				new Point(sceneCorner1[0], sceneCorner1[1]),
+				new Point(sceneCorner2[0], sceneCorner2[1]),
+				new Point(sceneCorner3[0], sceneCorner3[1]));
+		MatOfDouble projection = mCameraProjectionAdapter.getProjectionCV();
+		// Find the target's Euler angles and XYZ coordinates.
+		Calib3d.solvePnP(mReferenceCorners3D, mSceneCorners2D, projection, mDistCoeffs, mRVec,
+				mTVec);
+		// Positive y is up in OpenGL, down in OpenCV.
+		// Positive z is backward in OpenGL, forward in OpenCV.
+		// Positive angles are counter-clockwise in OpenGL,
+		// clockwise in OpenCV.
+		// Thus, x angles are negated but y and z angles are
+		// double-negated (that is, unchanged).
+		// Meanwhile, y and z positions are negated.
+		double[] rVecArray = mRVec.toArray();
+		rVecArray[0] *= -1.0; // negate x angle
+		mRVec.fromArray(rVecArray);
+		// Convert the Euler angles to a 3x3 rotation matrix.
+		Calib3d.Rodrigues(mRVec, mRotation);
+		double[] tVecArray = mTVec.toArray();
+		// OpenCV's matrix format is transposed, relative to
+		// OpenGL's matrix format.
+		mGLPose[0] = (float) mRotation.get(0, 0)[0];
+		mGLPose[1] = (float) mRotation.get(0, 1)[0];
+		mGLPose[2] = (float) mRotation.get(0, 2)[0];
+		mGLPose[3] = 0f;
+		mGLPose[4] = (float) mRotation.get(1, 0)[0];
+		mGLPose[5] = (float) mRotation.get(1, 1)[0];
+		mGLPose[6] = (float) mRotation.get(1, 2)[0];
+		mGLPose[7] = 0f;
+		mGLPose[8] = (float) mRotation.get(2, 0)[0];
+		mGLPose[9] = (float) mRotation.get(2, 1)[0];
+		mGLPose[10] = (float) mRotation.get(2, 2)[0];
+		mGLPose[11] = 0f;
+		mGLPose[12] = (float) tVecArray[0];
+		mGLPose[13] = -(float) tVecArray[1]; // negate y position
+		mGLPose[14] = -(float) tVecArray[2]; // negate z position
+		mGLPose[15] = 1f;
+		mTargetFound = true;
 	}
 
 	protected void draw(Mat src, Mat dst) {
 		if (dst != src) {
 			src.copyTo(dst);
 		}
-		if (mSceneCorners.height() < 4) {
+		if (!mTargetFound) {
 			// The target has not been found.
 			// Draw a thumbnail of the target in the upper-left
 			// corner so that the user knows what it is.
@@ -209,16 +307,6 @@ public class ImageDetectionFilter implements Filter {
 			Mat dstROI = dst.submat(0, height, 0, width);
 			// Copy a resized reference image into the ROI.
 			Imgproc.resize(mReferenceImage, dstROI, dstROI.size(), 0.0, 0.0, Imgproc.INTER_AREA);
-			return;
 		}
-		// Outline the found target in green.
-		Imgproc.line(dst, new Point(mSceneCorners.get(0, 0)), new Point(mSceneCorners.get(1, 0)),
-				mLineColor, 4);
-		Imgproc.line(dst, new Point(mSceneCorners.get(1, 0)), new Point(mSceneCorners.get(2, 0)),
-				mLineColor, 4);
-		Imgproc.line(dst, new Point(mSceneCorners.get(2, 0)), new Point(mSceneCorners.get(3, 0)),
-				mLineColor, 4);
-		Imgproc.line(dst, new Point(mSceneCorners.get(3, 0)), new Point(mSceneCorners.get(0, 0)),
-				mLineColor, 4);
 	}
 }

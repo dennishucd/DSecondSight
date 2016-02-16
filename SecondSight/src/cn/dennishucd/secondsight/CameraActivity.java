@@ -19,11 +19,13 @@ import org.opencv.imgproc.Imgproc;
 import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.graphics.PixelFormat;
 import android.hardware.Camera;
 import android.hardware.Camera.CameraInfo;
 import android.hardware.Camera.Parameters;
 import android.hardware.Camera.Size;
 import android.net.Uri;
+import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -36,10 +38,14 @@ import android.view.MenuItem;
 import android.view.SubMenu;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.Toast;
-import cn.dennishucd.secondsight.ar.ImageDetectionFilter;
+import cn.dennishucd.secondsight.adapters.CameraProjectionAdapter;
 import cn.dennishucd.secondsight.filters.Filter;
 import cn.dennishucd.secondsight.filters.NoneFilter;
+import cn.dennishucd.secondsight.filters.ar.ARFilter;
+import cn.dennishucd.secondsight.filters.ar.ImageDetectionFilter;
+import cn.dennishucd.secondsight.filters.ar.NoneARFilter;
 import cn.dennishucd.secondsight.filters.convolution.StrokeEdgesFilter;
 import cn.dennishucd.secondsight.filters.curve.CrossProcessCurveFilter;
 import cn.dennishucd.secondsight.filters.curve.PortraCurveFilter;
@@ -98,13 +104,19 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 	private Filter[] mCurveFilters;
 	private Filter[] mMixerFilters;
 	private Filter[] mConvolutionFilters;
-	private Filter[] mImageDetectionFilters;
+	private ARFilter[] mImageDetectionFilters;
 
 	// The indices of the active filters.
 	private int mCurveFilterIndex;
 	private int mMixerFilterIndex;
 	private int mConvolutionFilterIndex;
 	private int mImageDetectionFilterIndex;
+
+	// An adapter between the video camera and projection
+	// matrix.
+	private CameraProjectionAdapter mCameraProjectionAdapter;
+	// The renderer for 3D augmentations.
+	private ARCubeRenderer mARRenderer;
 
 	// The OpenCV loader callback.
 	private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
@@ -123,25 +135,27 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 						new RecolorRGVFilter(), new RecolorCMVFilter() };
 				mConvolutionFilters = new Filter[] { new NoneFilter(), new StrokeEdgesFilter() };
 
-				final Filter starryNight;
+				final ARFilter starryNight;
 				try {
+					// Define The Starry Night to be 1.0 units tall
 					starryNight = new ImageDetectionFilter(CameraActivity.this,
-							R.drawable.starry_night);
+							R.drawable.starry_night, mCameraProjectionAdapter, 1.0);
 				} catch (IOException e) {
 					Log.e(TAG, "Failed to load drawable: " + "starry_night");
 					e.printStackTrace();
 					break;
 				}
-				final Filter akbarHunting;
+				final ARFilter akbarHunting;
 				try {
+					// Define Akbar Hunting with Cheetahs to be 1.0 units wide.
 					akbarHunting = new ImageDetectionFilter(CameraActivity.this,
-							R.drawable.akbar_hunting_with_cheetahs);
+							R.drawable.akbar_hunting_with_cheetahs, mCameraProjectionAdapter, 1.0);
 				} catch (IOException e) {
 					Log.e(TAG, "Failed to load drawable: " + "akbar_hunting_with_cheetahs");
 					e.printStackTrace();
 					break;
 				}
-				mImageDetectionFilters = new Filter[] { new NoneFilter(), starryNight,
+				mImageDetectionFilters = new ARFilter[] { new NoneARFilter(), starryNight,
 						akbarHunting };
 
 				break;
@@ -176,6 +190,33 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 			mImageDetectionFilterIndex = 0;
 		}
 
+		final FrameLayout layout = new FrameLayout(this);
+		layout.setLayoutParams(new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+				FrameLayout.LayoutParams.MATCH_PARENT));
+		setContentView(layout);
+
+		mCameraView = new JavaCameraView(this, mCameraIndex);
+		mCameraView.setLayoutParams(new FrameLayout.LayoutParams(
+				FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+		layout.addView(mCameraView);
+
+		GLSurfaceView glSurfaceView = new GLSurfaceView(this);
+		glSurfaceView.getHolder().setFormat(PixelFormat.TRANSPARENT);
+		glSurfaceView.setEGLConfigChooser(8, 8, 8, 8, 0, 0);
+		glSurfaceView.setZOrderOnTop(true);
+		glSurfaceView.setLayoutParams(new FrameLayout.LayoutParams(
+				FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+		layout.addView(glSurfaceView);
+
+		mCameraProjectionAdapter = new CameraProjectionAdapter();
+		mARRenderer = new ARCubeRenderer();
+		mARRenderer.cameraProjectionAdapter = mCameraProjectionAdapter;
+		// Earlier, we defined the printed image's size as
+		// 1.0 unit.
+		// Define the cube to be half this size.
+		mARRenderer.scale = 0.5f;
+		glSurfaceView.setRenderer(mARRenderer);
+
 		final Camera camera;
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.GINGERBREAD) {
 			CameraInfo cameraInfo = new CameraInfo();
@@ -194,10 +235,15 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 
 		mSupportedImageSizes = parameters.getSupportedPreviewSizes();
 		final Size size = mSupportedImageSizes.get(mImageSizeIndex);
-		mCameraView = new JavaCameraView(this, mCameraIndex);
+
+		mCameraProjectionAdapter.setCameraParameters(parameters, size);
+		// Earlier, we defined the printed image's size as
+		// 1.0 unit.
+		// Leave the near and far clip distances at their default
+		// values, which are 0.1 (one-tenth the image size)
+		// and 10.0 (ten times the image size).
 		mCameraView.setMaxFrameSize(size.width, size.height);
 		mCameraView.setCvCameraViewListener(this);
-		setContentView(mCameraView);
 	}
 
 	public void onSaveInstanceState(Bundle savedInstanceState) {
@@ -323,7 +369,7 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 			if (mImageDetectionFilterIndex == mImageDetectionFilters.length) {
 				mImageDetectionFilterIndex = 0;
 			}
-			//Toast.makeText(this, "image detection", Toast.LENGTH_SHORT).show();
+			mARRenderer.filter = mImageDetectionFilters[mImageDetectionFilterIndex];
 			return true;
 		default:
 			return super.onOptionsItemSelected(item);
@@ -358,8 +404,9 @@ public class CameraActivity extends ActionBarActivity implements CvCameraViewLis
 		}
 		if (mImageDetectionFilters != null) {
 			mImageDetectionFilters[mImageDetectionFilterIndex].apply(rgba, rgba);
-			
-			//Log.i("onCameraFrame", "mMixerFilterIndex "+mImageDetectionFilterIndex);
+
+			// Log.i("onCameraFrame", "mMixerFilterIndex
+			// "+mImageDetectionFilterIndex);
 		}
 
 		if (mIsPhotoPending) {
